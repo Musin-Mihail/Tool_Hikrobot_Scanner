@@ -118,6 +118,8 @@ namespace HikrobotScanner.ViewModels
                 return;
             }
 
+            _dataService.StartNewSession();
+
             _cameraService.Initialize(userSet1, userSet2);
             _serverService.Start(port1, port2);
 
@@ -213,13 +215,15 @@ namespace HikrobotScanner.ViewModels
         private void ProcessCombinedData(string data1, string data2)
         {
             var combinedData = $"{data1.Trim()}#{data2.Trim()}";
-            var allParts = combinedData.Split(new[] { "#" }, StringSplitOptions.RemoveEmptyEntries);
+            var allParts = combinedData.Split(new[] { "#", ";;", ";" }, StringSplitOptions.RemoveEmptyEntries);
 
             var linearCodes = new List<string>();
             var qrCodes = new List<string>();
 
-            foreach (var part in allParts)
+            foreach (var rawPart in allParts)
             {
+                var part = rawPart.Trim();
+
                 if (part.Length == 20 && long.TryParse(part, out _))
                 {
                     linearCodes.Add(part);
@@ -267,7 +271,7 @@ namespace HikrobotScanner.ViewModels
             var dataToSave = string.Join("#", codesToSave);
 
             _receivedCodes.Add(dataToSave);
-            _dataService.SaveSingleCode(finalLinearCode, dataToSave);
+            _dataService.AppendData(dataToSave);
             _logger.Log($"Код успешно обработан и сохранен: {finalLinearCode}");
         }
 
