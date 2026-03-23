@@ -215,7 +215,7 @@ namespace HikrobotScanner.ViewModels
         private void ProcessCombinedData(string data1, string data2)
         {
             var combinedData = $"{data1.Trim()}#{data2.Trim()}";
-            var allParts = combinedData.Split(new[] { "#", ";;", ";" }, StringSplitOptions.RemoveEmptyEntries);
+            var allParts = combinedData.Split(new[] { "#" }, StringSplitOptions.RemoveEmptyEntries);
 
             var linearCodes = new List<string>();
             var qrCodes = new List<string>();
