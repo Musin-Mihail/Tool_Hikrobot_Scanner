@@ -1,11 +1,11 @@
-﻿namespace HikrobotScanner.Interfaces
+namespace HikrobotScanner.Interfaces
 {
     /// <summary>
-    /// Интерфейс сервиса для работы с камерами Hikrobot
+    /// Интерфейс сервиса для работы с камерой Hikrobot
     /// </summary>
     public interface ICameraService
     {
-        void Initialize(string userSet1, string userSet2);
+        void Initialize(string cameraIp, string userSet);
         void Cleanup();
     }
 }

@@ -1,16 +1,19 @@
-﻿using HikrobotScanner.Interfaces;
+using HikrobotScanner.Interfaces;
 using MvCamCtrl.NET;
+using System.Net;
 using System.Runtime.InteropServices;
 
 namespace HikrobotScanner.Services
 {
     /// <summary>
-    /// Сервис, инкапсулирующий всю логику работы с SDK камер Hikrobot.
+    /// Сервис, инкапсулирующий логику работы с SDK камеры Hikrobot.
     /// </summary>
     public class CameraService : ICameraService
     {
         private readonly IAppLogger _logger;
-        private readonly List<MyCamera> _cameras = new List<MyCamera>();
+        private MyCamera? _camera;
+
+        private sealed record DiscoveredCamera(MyCamera.MV_CC_DEVICE_INFO DeviceInfo, string Name, string? IpAddress);
 
         public CameraService(IAppLogger logger)
         {
@@ -18,13 +21,13 @@ namespace HikrobotScanner.Services
         }
 
         /// <summary>
-        /// Инициализация и подключение к камерам.
+        /// Инициализация и подключение к камере (по IP из настроек, либо к единственной найденной).
         /// </summary>
-        public void Initialize(string userSet1, string userSet2)
+        public void Initialize(string cameraIp, string userSet)
         {
-            if (_cameras.Count > 0)
+            if (_camera != null)
             {
-                _logger.Log("Камеры уже подключены.");
+                _logger.Log("Камера уже подключена.");
                 return;
             }
 
@@ -34,134 +37,238 @@ namespace HikrobotScanner.Services
             int nRet = MyCamera.MV_CC_EnumDevices_NET(MyCamera.MV_GIGE_DEVICE | MyCamera.MV_USB_DEVICE, ref stDevList);
             if (nRet != MyCamera.MV_OK)
             {
-                _logger.Log("Ошибка: Не удалось перечислить устройства.");
+                _logger.Log($"Ошибка: Не удалось перечислить устройства. Код: {nRet:X}");
                 return;
             }
 
-            if (stDevList.nDeviceNum < 2)
+            if (stDevList.nDeviceNum == 0)
             {
-                _logger.Log($"Ошибка: Найдено {stDevList.nDeviceNum} камер, но требуется 2.");
+                _logger.Log("Ошибка: Камеры не найдены.");
                 return;
             }
 
-            _logger.Log($"Найдено {stDevList.nDeviceNum} камер. Подключение к первым двум...");
-
-            string[] userSets = { userSet1, userSet2 };
-
-            for (int i = 0; i < 2; i++)
+            var devices = GetDiscoveredCameras(stDevList);
+            if (devices.Count == 0)
             {
-                var camera = new MyCamera();
-                MyCamera.MV_CC_DEVICE_INFO stDevInfo = (MyCamera.MV_CC_DEVICE_INFO)Marshal.PtrToStructure(stDevList.pDeviceInfo[i], typeof(MyCamera.MV_CC_DEVICE_INFO));
-
-                string cameraName = GetCameraName(stDevInfo, i);
-                _logger.Log($"Попытка подключения к камере: {cameraName}");
-
-                nRet = camera.MV_CC_CreateDevice_NET(ref stDevInfo);
-                if (nRet != MyCamera.MV_OK)
-                {
-                    _logger.Log($"Ошибка: Не удалось создать экземпляр для камеры {cameraName}. Код: {nRet:X}");
-                    continue;
-                }
-
-                nRet = camera.MV_CC_OpenDevice_NET();
-                if (nRet != MyCamera.MV_OK)
-                {
-                    _logger.Log($"Ошибка: Не удалось открыть камеру {cameraName}. Код: {nRet:X}");
-                    camera.MV_CC_DestroyDevice_NET();
-                    continue;
-                }
-
-                string selectedUserSet = userSets[i];
-                _logger.Log($"Загрузка настроек из {selectedUserSet} для камеры {cameraName}...");
-
-                nRet = camera.MV_CC_SetEnumValueByString_NET("UserSetSelector", selectedUserSet);
-                if (nRet != MyCamera.MV_OK)
-                {
-                    _logger.Log($"Ошибка: Не удалось выбрать {selectedUserSet} для камеры {cameraName}. Код: {nRet:X}");
-                    camera.MV_CC_CloseDevice_NET();
-                    camera.MV_CC_DestroyDevice_NET();
-                    continue;
-                }
-
-                nRet = camera.MV_CC_SetCommandValue_NET("UserSetLoad");
-                if (nRet != MyCamera.MV_OK)
-                {
-                    _logger.Log($"Ошибка: Не удалось загрузить настройки из {selectedUserSet} для камеры {cameraName}. Код: {nRet:X}");
-                    camera.MV_CC_CloseDevice_NET();
-                    camera.MV_CC_DestroyDevice_NET();
-                    continue;
-                }
-                _logger.Log($"Настройки из {selectedUserSet} успешно загружены для камеры {cameraName}.");
-
-                nRet = camera.MV_CC_StartGrabbing_NET();
-                if (nRet != MyCamera.MV_OK)
-                {
-                    _logger.Log($"Ошибка: Не удалось начать захват изображений для камеры {cameraName}. Код: {nRet:X}");
-                    camera.MV_CC_CloseDevice_NET();
-                    camera.MV_CC_DestroyDevice_NET();
-                    continue;
-                }
-
-                _logger.Log($"Захват изображений запущен для камеры {cameraName}.");
-                _cameras.Add(camera);
+                _logger.Log("Ошибка: Не удалось прочитать параметры обнаруженных камер.");
+                return;
             }
 
-            if (_cameras.Count > 0)
+            _logger.Log($"Найдено камер: {devices.Count}.");
+            foreach (var dev in devices)
             {
-                _logger.Log($"Успешно подключено {_cameras.Count} камер(ы) через SDK.");
+                string ipLabel = dev.IpAddress != null ? $", IP: {dev.IpAddress}" : " (USB)";
+                _logger.Log($"  - {dev.Name}{ipLabel}");
             }
-            else
+
+            var selectedDevice = SelectCamera(devices, cameraIp);
+            if (selectedDevice == null)
             {
-                _logger.Log("Не удалось подключить ни одной камеры.");
+                return;
             }
+
+            _camera = ConnectAndStartCamera(selectedDevice, userSet);
         }
 
         /// <summary>
-        /// Освобождение ресурсов камер.
+        /// Освобождение ресурсов камеры.
         /// </summary>
         public void Cleanup()
         {
-            if (_cameras.Count == 0) return;
+            if (_camera == null) return;
 
-            _logger.Log("Освобождение ресурсов камер...");
-            foreach (var camera in _cameras)
-            {
-                camera.MV_CC_StopGrabbing_NET();
-                camera.MV_CC_CloseDevice_NET();
-                camera.MV_CC_DestroyDevice_NET();
-            }
-            _cameras.Clear();
-            _logger.Log("Все камеры отключены и ресурсы освобождены.");
+            _logger.Log("Освобождение ресурсов камеры...");
+            _camera.MV_CC_StopGrabbing_NET();
+            _camera.MV_CC_CloseDevice_NET();
+            _camera.MV_CC_DestroyDevice_NET();
+            _camera = null;
+            _logger.Log("Камера отключена и ресурсы освобождены.");
         }
 
-        private string GetCameraName(MyCamera.MV_CC_DEVICE_INFO stDevInfo, int index)
+        private List<DiscoveredCamera> GetDiscoveredCameras(MyCamera.MV_CC_DEVICE_INFO_LIST stDevList)
         {
-            string cameraName = "Безымянная камера";
+            var result = new List<DiscoveredCamera>();
+            int count = (int)Math.Min(stDevList.nDeviceNum, (uint)stDevList.pDeviceInfo.Length);
+
+            for (int i = 0; i < count; i++)
+            {
+                if (stDevList.pDeviceInfo[i] == IntPtr.Zero)
+                {
+                    continue;
+                }
+
+                var stDevInfo = Marshal.PtrToStructure<MyCamera.MV_CC_DEVICE_INFO>(stDevList.pDeviceInfo[i]);
+                var (name, ipAddress) = GetCameraInfo(stDevInfo, i);
+                result.Add(new DiscoveredCamera(stDevInfo, name, ipAddress));
+            }
+
+            return result;
+        }
+
+        private DiscoveredCamera? SelectCamera(List<DiscoveredCamera> devices, string cameraIp)
+        {
+            string targetIp = NormalizeIp(cameraIp);
+
+            if (!string.IsNullOrEmpty(targetIp))
+            {
+                var matched = devices.FirstOrDefault(d =>
+                    d.IpAddress != null &&
+                    string.Equals(d.IpAddress, targetIp, StringComparison.OrdinalIgnoreCase));
+
+                if (matched != null)
+                {
+                    _logger.Log($"Выбрана камера по IP {targetIp}: {matched.Name}");
+                    return matched;
+                }
+            }
+
+            if (devices.Count == 1)
+            {
+                var single = devices[0];
+                if (string.IsNullOrEmpty(targetIp))
+                {
+                    _logger.Log($"Подключение к единственной найденной камере: {single.Name}");
+                }
+                else
+                {
+                    string foundIpText = single.IpAddress != null ? $" (IP: {single.IpAddress})" : string.Empty;
+                    _logger.Log($"Предупреждение: Камера с IP {targetIp} не найдена, но обнаружена единственная камера {single.Name}{foundIpText}. Подключение к ней.");
+                }
+                return single;
+            }
+
+            if (string.IsNullOrEmpty(targetIp))
+            {
+                _logger.Log($"Ошибка: Найдено {devices.Count} камер, но не указан IP нужной камеры. Укажите IP камеры в настройках.");
+            }
+            else
+            {
+                _logger.Log($"Ошибка: Найдено {devices.Count} камер, но камера с IP '{targetIp}' не обнаружена. Проверьте IP камеры в настройках.");
+            }
+
+            return null;
+        }
+
+        private MyCamera? ConnectAndStartCamera(DiscoveredCamera selected, string userSet)
+        {
+            var camera = new MyCamera();
+            var stDevInfo = selected.DeviceInfo;
+
+            _logger.Log($"Попытка подключения к камере: {selected.Name}");
+
+            int nRet = camera.MV_CC_CreateDevice_NET(ref stDevInfo);
+            if (nRet != MyCamera.MV_OK)
+            {
+                _logger.Log($"Ошибка: Не удалось создать экземпляр для камеры {selected.Name}. Код: {nRet:X}");
+                return null;
+            }
+
+            nRet = camera.MV_CC_OpenDevice_NET();
+            if (nRet != MyCamera.MV_OK)
+            {
+                _logger.Log($"Ошибка: Не удалось открыть камеру {selected.Name}. Код: {nRet:X}");
+                camera.MV_CC_DestroyDevice_NET();
+                return null;
+            }
+
+            _logger.Log($"Загрузка настроек из {userSet} для камеры {selected.Name}...");
+
+            nRet = camera.MV_CC_SetEnumValueByString_NET("UserSetSelector", userSet);
+            if (nRet != MyCamera.MV_OK)
+            {
+                _logger.Log($"Ошибка: Не удалось выбрать {userSet} для камеры {selected.Name}. Код: {nRet:X}");
+                camera.MV_CC_CloseDevice_NET();
+                camera.MV_CC_DestroyDevice_NET();
+                return null;
+            }
+
+            nRet = camera.MV_CC_SetCommandValue_NET("UserSetLoad");
+            if (nRet != MyCamera.MV_OK)
+            {
+                _logger.Log($"Ошибка: Не удалось загрузить настройки из {userSet} для камеры {selected.Name}. Код: {nRet:X}");
+                camera.MV_CC_CloseDevice_NET();
+                camera.MV_CC_DestroyDevice_NET();
+                return null;
+            }
+            _logger.Log($"Настройки из {userSet} успешно загружены для камеры {selected.Name}.");
+
+            nRet = camera.MV_CC_StartGrabbing_NET();
+            if (nRet != MyCamera.MV_OK)
+            {
+                _logger.Log($"Ошибка: Не удалось начать захват изображений для камеры {selected.Name}. Код: {nRet:X}");
+                camera.MV_CC_CloseDevice_NET();
+                camera.MV_CC_DestroyDevice_NET();
+                return null;
+            }
+
+            _logger.Log($"Захват изображений запущен для камеры {selected.Name}. Успешно подключена через SDK.");
+            return camera;
+        }
+
+        private (string Name, string? IpAddress) GetCameraInfo(MyCamera.MV_CC_DEVICE_INFO stDevInfo, int index)
+        {
+            string? cameraName = null;
+            string? ipAddress = null;
+
             try
             {
                 if (stDevInfo.nTLayerType == MyCamera.MV_GIGE_DEVICE)
                 {
                     byte[] gigeInfoBytes = stDevInfo.SpecialInfo.stGigEInfo;
-                    MyCamera.MV_GIGE_DEVICE_INFO gigeInfo = (MyCamera.MV_GIGE_DEVICE_INFO)MyCamera.ByteToStruct(gigeInfoBytes, typeof(MyCamera.MV_GIGE_DEVICE_INFO));
-                    cameraName = gigeInfo.chUserDefinedName;
+                    var gigeInfo = (MyCamera.MV_GIGE_DEVICE_INFO)MyCamera.ByteToStruct(gigeInfoBytes, typeof(MyCamera.MV_GIGE_DEVICE_INFO));
+                    ipAddress = FormatGigEIp(gigeInfo.nCurrentIp);
+                    cameraName = CleanSdkString(gigeInfo.chUserDefinedName);
+                    if (string.IsNullOrEmpty(cameraName))
+                    {
+                        cameraName = CleanSdkString(gigeInfo.chModelName);
+                    }
                 }
                 else if (stDevInfo.nTLayerType == MyCamera.MV_USB_DEVICE)
                 {
                     byte[] usbInfoBytes = stDevInfo.SpecialInfo.stUsb3VInfo;
-                    MyCamera.MV_USB3_DEVICE_INFO usbInfo = (MyCamera.MV_USB3_DEVICE_INFO)MyCamera.ByteToStruct(usbInfoBytes, typeof(MyCamera.MV_USB3_DEVICE_INFO));
-                    cameraName = usbInfo.chUserDefinedName;
+                    var usbInfo = (MyCamera.MV_USB3_DEVICE_INFO)MyCamera.ByteToStruct(usbInfoBytes, typeof(MyCamera.MV_USB3_DEVICE_INFO));
+                    cameraName = CleanSdkString(usbInfo.chUserDefinedName);
+                    if (string.IsNullOrEmpty(cameraName))
+                    {
+                        cameraName = CleanSdkString(usbInfo.chModelName);
+                    }
                 }
             }
             catch (Exception ex)
             {
-                _logger.Log($"Не удалось прочитать имя камеры {index + 1}: {ex.Message}");
+                _logger.Log($"Не удалось прочитать параметры камеры {index + 1}: {ex.Message}");
             }
 
             if (string.IsNullOrEmpty(cameraName))
             {
                 cameraName = $"Камера {index + 1} (без имени)";
             }
-            return cameraName;
+
+            return (cameraName, ipAddress);
+        }
+
+        private static string FormatGigEIp(uint ip)
+        {
+            uint nIp1 = (ip & 0xFF000000) >> 24;
+            uint nIp2 = (ip & 0x00FF0000) >> 16;
+            uint nIp3 = (ip & 0x0000FF00) >> 8;
+            uint nIp4 = ip & 0x000000FF;
+            return $"{nIp1}.{nIp2}.{nIp3}.{nIp4}";
+        }
+
+        private static string NormalizeIp(string? rawIp)
+        {
+            string trimmed = (rawIp ?? string.Empty).Trim();
+            if (IPAddress.TryParse(trimmed, out var parsed))
+            {
+                return parsed.ToString();
+            }
+            return trimmed;
+        }
+
+        private static string? CleanSdkString(string? value)
+        {
+            return value?.TrimEnd('\0').Trim();
         }
     }
 }

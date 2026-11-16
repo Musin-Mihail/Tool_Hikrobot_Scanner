@@ -1,4 +1,4 @@
-﻿using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using HikrobotScanner.Interfaces;
 using HikrobotScanner.Properties;
@@ -25,22 +25,16 @@ namespace HikrobotScanner.ViewModels
         #region Свойства состояния (State)
 
         [ObservableProperty]
-        private Settings _settings;
+        private Settings _settings = null!;
 
         [ObservableProperty]
-        private string _logText;
+        private string _logText = string.Empty;
 
         [ObservableProperty]
         private string _statusText = "Сервер не запущен.";
 
         [ObservableProperty]
         private bool _isErrorState;
-
-        [ObservableProperty]
-        private string _camera1Data;
-
-        [ObservableProperty]
-        private string _camera2Data;
 
         [ObservableProperty]
         private int _barcodeQuantity = 10;
@@ -66,9 +60,6 @@ namespace HikrobotScanner.ViewModels
         private bool _isServerRunning;
 
         public bool IsServerStopped => !IsServerRunning;
-
-        private string _camera1DataBuffer = null;
-        private string _camera2DataBuffer = null;
 
         private readonly List<string> _receivedCodes = new List<string>();
 
@@ -105,26 +96,26 @@ namespace HikrobotScanner.ViewModels
         [RelayCommand(CanExecute = nameof(CanStartServer))]
         private void StartServer()
         {
-            _logger.Log("Запуск сервера и инициализация камер...");
+            _logger.Log("Запуск сервера и инициализация камеры...");
 
-            string userSet1 = $"UserSet{Settings.UserSetIndex + 1}";
-            string userSet2 = $"UserSet{Settings.UserSetIndex2 + 1}";
+            int userSetNumber = Math.Clamp(Settings.UserSetIndex, 0, 2) + 1;
+            string userSet = $"UserSet{userSetNumber}";
 
-            if (!int.TryParse(Settings.ListenPort, out int port1) || !int.TryParse(Settings.ListenPort2, out int port2))
+            if (!int.TryParse(Settings.ListenPort, out int port) || port < 1 || port > 65535)
             {
-                string errorMsg = $"Ошибка: Неверный формат портов в настройках ('{Settings.ListenPort}', '{Settings.ListenPort2}'). Сервер не запущен.";
+                string errorMsg = $"Ошибка: Неверный формат порта в настройках ('{Settings.ListenPort}'). Сервер не запущен.";
                 _logger.Log(errorMsg);
-                ShowError("Один или оба порта для прослушивания указаны неверно. Проверьте настройки.", "Ошибка настроек");
+                ShowError("Порт для прослушивания указан неверно. Проверьте настройки.", "Ошибка настроек");
                 return;
             }
 
             _dataService.StartNewSession();
 
-            _cameraService.Initialize(userSet1, userSet2);
-            _serverService.Start(port1, port2);
+            _cameraService.Initialize(Settings.CameraIp, userSet);
+            _serverService.Start(port);
 
             IsServerRunning = true;
-            StatusText = $"Сервер слушает порты {port1} & {port2}";
+            StatusText = $"Сервер слушает порт {port}";
         }
         private bool CanStartServer() => IsServerStopped;
 
@@ -177,53 +168,29 @@ namespace HikrobotScanner.ViewModels
         /// <summary>
         /// Этот метод вызывается из ServerService (из другого потока)
         /// </summary>
-        private void OnDataReceivedFromService(int cameraNumber, string data)
+        private void OnDataReceivedFromService(string data)
         {
             _dispatcher.InvokeOnUIThread(() =>
             {
-                if (cameraNumber == 1)
-                {
-                    _camera1DataBuffer = data;
-                    _logger.Log("Получены данные с камеры 1.");
-                    _logger.Log(data);
-                }
-                else
-                {
-                    _camera2DataBuffer = data;
-                    _logger.Log("Получены данные с камеры 2.");
-                    _logger.Log(data);
-                }
+                _logger.Log("Получены данные с камеры.");
+                _logger.Log(data);
 
-                if (_camera1DataBuffer != null && _camera2DataBuffer != null)
-                {
-                    _logger.Log("Получены данные с обеих камер, начинаю обработку.");
-
-                    string data1 = _camera1DataBuffer;
-                    string data2 = _camera2DataBuffer;
-
-                    _camera1DataBuffer = null;
-                    _camera2DataBuffer = null;
-
-                    ProcessCombinedData(data1, data2);
-                }
+                ProcessData(data);
             });
         }
 
         /// <summary>
         /// Вся бизнес-логика проверки кодов
         /// </summary>
-        private void ProcessCombinedData(string data1, string data2)
+        private void ProcessData(string data)
         {
-            var combinedData = $"{data1.Trim()}#{data2.Trim()}";
-            var allParts = combinedData.Split(new[] { "#" }, StringSplitOptions.RemoveEmptyEntries);
+            var allParts = data.Split('#', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
             var linearCodes = new List<string>();
             var qrCodes = new List<string>();
 
-            foreach (var rawPart in allParts)
+            foreach (var part in allParts)
             {
-                var part = rawPart.Trim();
-
                 if (part.Length == 20 && long.TryParse(part, out _))
                 {
                     linearCodes.Add(part);

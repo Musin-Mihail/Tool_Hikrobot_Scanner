@@ -1,4 +1,4 @@
-﻿<?xml version='1.0' encoding='utf-8'?>
+<?xml version='1.0' encoding='utf-8'?>
 <SettingsFile xmlns="http://schemas.microsoft.com/VisualStudio/2004/01/settings" CurrentProfile="(Default)" GeneratedClassNamespace="HikrobotScanner.Properties" GeneratedClassName="Settings">
   <Profiles />
   <Settings>
@@ -12,15 +12,6 @@
       <Value Profile="(Default)">0</Value>
     </Setting>
     <Setting Name="UserSetIndex" Type="System.Int32" Scope="User">
-      <Value Profile="(Default)">2</Value>
-    </Setting>
-    <Setting Name="CameraIp2" Type="System.String" Scope="User">
-      <Value Profile="(Default)">192.168.1.21</Value>
-    </Setting>
-    <Setting Name="ListenPort2" Type="System.String" Scope="User">
-      <Value Profile="(Default)">5100</Value>
-    </Setting>
-    <Setting Name="UserSetIndex2" Type="System.Int32" Scope="User">
       <Value Profile="(Default)">2</Value>
     </Setting>
   </Settings>

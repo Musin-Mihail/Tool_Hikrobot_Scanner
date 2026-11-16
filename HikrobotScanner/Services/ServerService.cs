@@ -1,4 +1,4 @@
-﻿using HikrobotScanner.Interfaces;
+using HikrobotScanner.Interfaces;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -13,11 +13,10 @@ namespace HikrobotScanner.Services
     {
         private readonly IAppLogger _logger;
 
-        public Action<int, string> DataReceivedCallback { get; set; }
+        public Action<string>? DataReceivedCallback { get; set; }
 
-        private TcpListener _tcpServer1;
-        private TcpListener _tcpServer2;
-        private CancellationTokenSource _cancellationTokenSource;
+        private TcpListener? _tcpServer;
+        private CancellationTokenSource? _cancellationTokenSource;
 
         public ServerService(IAppLogger logger)
         {
@@ -25,44 +24,56 @@ namespace HikrobotScanner.Services
         }
 
         /// <summary>
-        /// Запускает TCP-серверы для прослушивания входящих данных от камер.
+        /// Запускает TCP-сервер для прослушивания входящих данных от камеры.
         /// </summary>
-        public void Start(int port1, int port2)
+        public void Start(int port)
         {
-            _cancellationTokenSource = new CancellationTokenSource();
+            Stop();
 
-            _tcpServer1 = new TcpListener(IPAddress.Any, port1);
-            Task.Run(() => ListenForClients(_tcpServer1, 1, _cancellationTokenSource.Token), _cancellationTokenSource.Token);
-            _logger.Log($"Сервер для камеры 1 запущен. Ожидание данных на порту {port1}...");
+            var cts = new CancellationTokenSource();
+            _cancellationTokenSource = cts;
 
-            _tcpServer2 = new TcpListener(IPAddress.Any, port2);
-            Task.Run(() => ListenForClients(_tcpServer2, 2, _cancellationTokenSource.Token), _cancellationTokenSource.Token);
-            _logger.Log($"Сервер для камеры 2 запущен. Ожидание данных на порту {port2}...");
+            var server = new TcpListener(IPAddress.Any, port);
+            _tcpServer = server;
+
+            _ = Task.Run(() => ListenForClients(server, cts));
+            _logger.Log($"Сервер запущен. Ожидание данных от камеры на порту {port}...");
         }
 
         /// <summary>
-        /// Останавливает оба TCP-сервера.
+        /// Останавливает TCP-сервер.
         /// </summary>
         public void Stop()
         {
-            _cancellationTokenSource?.Cancel();
-            _tcpServer1?.Stop();
-            _tcpServer2?.Stop();
+            var cts = _cancellationTokenSource;
+            _cancellationTokenSource = null;
+
+            var server = _tcpServer;
+            _tcpServer = null;
+
+            try
+            {
+                cts?.Cancel();
+            }
+            catch (ObjectDisposedException) { }
+
+            server?.Stop();
         }
 
         /// <summary>
         /// Асинхронный метод, который слушает входящие подключения в цикле.
         /// </summary>
-        private async Task ListenForClients(TcpListener server, int cameraNumber, CancellationToken token)
+        private async Task ListenForClients(TcpListener server, CancellationTokenSource cts)
         {
+            var token = cts.Token;
             try
             {
                 server.Start();
                 while (!token.IsCancellationRequested)
                 {
                     var client = await server.AcceptTcpClientAsync(token);
-                    _logger.Log($"Камера {cameraNumber} подключилась для отправки данных.");
-                    _ = HandleClientTask(client, cameraNumber, token);
+                    _logger.Log("Камера подключилась для отправки данных.");
+                    _ = HandleClientTask(client, token);
                 }
             }
             catch (OperationCanceledException) { }
@@ -71,47 +82,51 @@ namespace HikrobotScanner.Services
             {
                 if (!token.IsCancellationRequested)
                 {
-                    _logger.Log($"Критическая ошибка сервера (Камера {cameraNumber}): {ex.Message}");
+                    _logger.Log($"Критическая ошибка сервера: {ex.Message}");
                 }
             }
             finally
             {
-                server?.Stop();
-                _logger.Log($"Сервер для камеры {cameraNumber} остановлен.");
+                server.Stop();
+                cts.Dispose();
+                _logger.Log("TCP-сервер остановлен.");
             }
         }
 
         /// <summary>
         /// Обрабатывает входящие данные от подключенного клиента (камеры) в фоновом потоке.
         /// </summary>
-        private async Task HandleClientTask(TcpClient client, int cameraNumber, CancellationToken token)
+        private async Task HandleClientTask(TcpClient client, CancellationToken token)
         {
             try
             {
                 using (var stream = client.GetStream())
                 {
-                    var buffer = new byte[1024];
+                    var buffer = new byte[8192];
                     int bytesRead;
                     while (!token.IsCancellationRequested && (bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, token)) != 0)
                     {
                         var receivedData = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
-                        DataReceivedCallback?.Invoke(cameraNumber, receivedData);
+                        if (!string.IsNullOrEmpty(receivedData))
+                        {
+                            DataReceivedCallback?.Invoke(receivedData);
+                        }
                     }
                 }
             }
             catch (OperationCanceledException) { }
             catch (IOException ex) when (ex.InnerException is SocketException)
             {
-                _logger.Log($"Соединение (Камера {cameraNumber}) было принудительно разорвано.");
+                _logger.Log("Соединение с камерой было принудительно разорвано.");
             }
             catch (Exception ex)
             {
-                _logger.Log($"Ошибка при чтении данных (Камера {cameraNumber}): {ex.Message}");
+                _logger.Log($"Ошибка при чтении данных от камеры: {ex.Message}");
             }
             finally
             {
                 client.Close();
-                _logger.Log($"Камера {cameraNumber} отключилась.");
+                _logger.Log("Камера отключилась.");
             }
         }
     }
